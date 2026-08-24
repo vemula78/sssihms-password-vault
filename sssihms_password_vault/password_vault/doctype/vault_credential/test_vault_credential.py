@@ -420,10 +420,19 @@ class TestVaultCredential(FrappeTestCase):
         the shared set over permission_query_conditions — so a DocShare row would overturn
         both membership hooks, including the auditor's 1=0 lock. It must be refused."""
         cred = self._make_credential(title="DocShare Test")
-        _ensure_user(NOROLE)
+        # OUTSIDER, not NOROLE: this has to prove that a share cannot *widen* the
+        # membership hooks, so the sharee must be someone the role ceiling already admits.
+        # A role-less account is stopped earlier and more bluntly — frappe.get_list raises
+        # PermissionError at check_select_permission rather than returning an empty list,
+        # which proves nothing about DocShare.
         with self.assertRaises(frappe.PermissionError):
-            frappe.share.add("Vault Credential", cred.name, NOROLE, read=1)
-        frappe.set_user(NOROLE)
+            frappe.share.add("Vault Credential", cred.name, OUTSIDER, read=1)
+        self.assertFalse(
+            frappe.db.exists(
+                "DocShare", {"share_doctype": "Vault Credential", "share_name": cred.name}
+            )
+        )
+        frappe.set_user(OUTSIDER)
         self.assertEqual(frappe.get_list("Vault Credential", pluck="name"), [])
         frappe.set_user("Administrator")
 
