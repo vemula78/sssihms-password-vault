@@ -77,10 +77,14 @@ which is what actually prevents a Version row.
   — but it accepted it by inheriting `maskValue()` from the personal vault, which had no
   statutory exposure. Last-4 of an Aadhaar is personal data under the DPDP Act 2023. This
   is Praveen's call, not a bug to be quietly patched.
-- **`X-Forwarded-For` at the proxy (H2, second half).** The per-user budget makes the
-  limiter sound regardless, but whether the Apache in front of the site *sets* or *appends*
-  the header still decides whether `ip_address` and the outer decorator mean anything.
-  Needs one look at the vhost on the VM.
+- ~~**`X-Forwarded-For` at the proxy (H2, second half).**~~ **Checked 24-Aug-2026 — see
+  `NOTES/client-ip-behind-apache.md`.** The spoof does not reach Frappe: nginx's
+  `@webserver` overwrites the header with `$remote_addr`. But every request therefore
+  arrives as the Docker gateway, so the IP-keyed limiter is one global bucket and
+  `ip_address` is uninformative rather than forgeable. The per-user budget is now the only
+  meaningful limit — do not remove it on the grounds that H2 "does not apply". A one-line
+  nginx change would restore true client IPs; it touches every app on the bench, so it is
+  Praveen's call, not a vault fix.
 - **`Vault Space.track_changes: 1` (L16)** keeps a second, unprotected copy of every
   membership change in Version rows, visible to anyone who can read the space. The access
   log already records these append-only. Left alone rather than silently dropping an
