@@ -15,6 +15,9 @@ import frappe
 from frappe.utils import cint, getdate
 from frappe.utils import today as frappe_today
 
+from sssihms_password_vault.vault.audit import write_access_log
+from sssihms_password_vault.vault.permissions import is_vault_auditor_only
+
 
 def daily_rotation_sweep() -> dict:
     """Scheduled entrypoint. Runs as Administrator under the scheduler, so
@@ -28,8 +31,8 @@ def daily_rotation_sweep() -> dict:
     3. Skip a credential last reminded within ``reminder_repeat_days`` — the re-remind
        cadence, so an overdue item nags on a schedule, not daily.
     4. Group by space; recipients are that space's Manager-level members (enabled Users
-       only), falling back to all Vault Admin role holders if a space has no enabled
-       manager.
+       only, auditors excluded), falling back to all Vault Admin role holders if a space
+       has no enabled manager.
     5. One digest per space: a Notification Log entry per recipient, plus one email to all
        of them. Titles and due dates only — never usernames, URLs, or any secret.
     6. Stamp ``last_reminded_on`` on every notified credential with a direct
@@ -75,10 +78,10 @@ def daily_rotation_sweep() -> dict:
     logger = frappe.logger("sssihms_password_vault")
 
     for space, credentials in by_space.items():
-        recipients = _space_manager_emails(space)
+        recipients = _space_manager_recipients(space)
         fallback_used = False
         if not recipients:
-            recipients = _vault_admin_emails()
+            recipients = _vault_admin_recipients()
             fallback_used = True
         if not recipients:
             logger.warning(
@@ -97,14 +100,36 @@ def daily_rotation_sweep() -> dict:
             frappe.get_doc(
                 {
                     "doctype": "Notification Log",
-                    "for_user": recipient,
+                    # A User *name*, which is what this field links to. The email address
+                    # is a separate column and only coincides with the name on sites where
+                    # usernames are email addresses (audit finding L17).
+                    "for_user": recipient["name"],
                     "type": "Alert",
                     "subject": subject,
                     "email_content": message,
                 }
             ).insert(ignore_permissions=True)
+
+        # A digest carries credential titles and due dates out of the space, so who
+        # received one is an access event. Titles never go into the log row itself —
+        # counts and recipients only.
+        write_access_log(
+            None,
+            action="reminder",
+            vault_space=space,
+            detail=(
+                f"rotation digest: {len(credentials)} credential(s) to "
+                f"{len(recipients)} recipient(s)"
+                + (" via Vault Admin fallback" if fallback_used else "")
+            ),
+        )
+
         try:
-            frappe.sendmail(recipients=recipients, subject=subject, message=message)
+            frappe.sendmail(
+                recipients=[r["email"] for r in recipients if r.get("email")],
+                subject=subject,
+                message=message,
+            )
         except Exception:
             # No outgoing email account (or SMTP down) must not kill the scheduled job:
             # the in-app Notification Log rows above are already written, which is the
@@ -130,8 +155,8 @@ def daily_rotation_sweep() -> dict:
     return {"spaces_notified": spaces_notified, "credentials_notified": notified}
 
 
-def _space_manager_emails(space: str) -> list[str]:
-    """Enabled-User names of ``space``'s Manager-level members."""
+def _space_manager_recipients(space: str) -> list[dict]:
+    """Enabled, non-auditor Manager-level members of ``space``."""
     managers = frappe.get_all(
         "Vault Space Member",
         filters={"parenttype": "Vault Space", "parent": space, "access_level": "Manager"},
@@ -141,9 +166,9 @@ def _space_manager_emails(space: str) -> list[str]:
     return _enabled(users)
 
 
-def _vault_admin_emails() -> list[str]:
-    """Enabled-User names of every Vault Admin role holder — the fallback when a space has
-    due credentials but no enabled Manager-level member."""
+def _vault_admin_recipients() -> list[dict]:
+    """Enabled Vault Admin role holders — the fallback when a space has due credentials but
+    no enabled Manager-level member."""
     admins = frappe.get_all(
         "Has Role", filters={"role": "Vault Admin", "parenttype": "User"}, fields=["parent"]
     )
@@ -151,11 +176,31 @@ def _vault_admin_emails() -> list[str]:
     return _enabled(users)
 
 
-def _enabled(users: set[str]) -> list[str]:
+def _enabled(users: set[str]) -> list[dict]:
+    """Enabled Users from ``users``, as ``{"name", "email"}``, with auditors dropped.
+
+    The sweep runs as Administrator and therefore never consults the permission hooks —
+    which made it the fourth auditor path the three mirrored guards do not cover (audit
+    finding M2). A digest lists exactly what an auditor must not see: the titles of the
+    credentials in a space. An auditor who is also a space Manager was receiving them, in a
+    Notification Log row inserted with ignore_permissions and in an email body that then
+    sits in tabEmail Queue.
+
+    ``is_vault_auditor_only`` returns False for a Vault Admin, so an admin who also audits
+    keeps receiving digests — the same precedence the rest of the app uses.
+    """
     if not users:
         return []
-    rows = frappe.get_all("User", filters={"name": ["in", list(users)], "enabled": 1}, fields=["name"])
-    return [row.name for row in rows]
+    rows = frappe.get_all(
+        "User",
+        filters={"name": ["in", list(users)], "enabled": 1},
+        fields=["name", "email"],
+    )
+    return [
+        {"name": row.name, "email": row.email or row.name}
+        for row in rows
+        if not is_vault_auditor_only(row.name)
+    ]
 
 
 def _digest_message(space: str, credentials: list, fallback_used: bool) -> str:

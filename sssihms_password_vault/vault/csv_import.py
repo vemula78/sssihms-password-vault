@@ -71,7 +71,20 @@ def parse_csv_rows(csv_text: str) -> ParseResult:
     - the accepted row's title falls back through ``title or url or username or
       "Imported login"``.
     """
-    all_rows = list(csv.reader(io.StringIO(csv_text)))
+    # Keep at most header + MAX_IMPORT_ROWS parsed rows, and *count* the rest without
+    # retaining them. `list(csv.reader(...))` built a list of every row in the file before
+    # the cap was applied (audit finding L7); the cap now bounds what is held, while
+    # `total_rows` stays the file's true row count — a truncated import has to be able to
+    # say how many rows it declined. (The `csv_text` string itself is a parameter and is
+    # necessarily whole in memory; this bounds the parsed structure, not the input.)
+    reader = csv.reader(io.StringIO(csv_text))
+    all_rows: list[list[str]] = []
+    overflow_rows = 0
+    for row in reader:
+        if len(all_rows) <= MAX_IMPORT_ROWS:  # header + cap
+            all_rows.append(row)
+        else:
+            overflow_rows += 1
     if not all_rows:
         return ParseResult()
 
@@ -83,7 +96,7 @@ def parse_csv_rows(csv_text: str) -> ParseResult:
             col_for[mapped] = i
 
     data_rows = all_rows[1:]
-    total_rows = len(data_rows)
+    total_rows = len(data_rows) + overflow_rows
     truncated = total_rows > MAX_IMPORT_ROWS
     limited = data_rows[:MAX_IMPORT_ROWS]
 
@@ -154,14 +167,37 @@ if frappe is not None:
         from sssihms_password_vault.vault.audit import write_access_log
         from sssihms_password_vault.vault.permissions import get_membership_level, is_vault_admin
 
-        user = frappe.session.user
-        if not frappe.db.exists("Vault Space", vault_space):
-            frappe.throw(_("Vault Space not found."))
-        if frappe.db.get_value("Vault Space", vault_space, "disabled"):
-            frappe.throw(_("This space is disabled."), frappe.PermissionError)
+        from sssihms_password_vault.vault.api import _require_vault_role
 
-        level = get_membership_level(user, vault_space)
-        if not is_vault_admin(user) and level not in ("Editor", "Manager"):
+        # A vault role first, and one message for every failure mode after it. The three
+        # distinct errors this used to raise — "not found", "disabled", "need Editor" —
+        # let any authenticated account enumerate space names and read their archival
+        # state, with no log row for the attempt (audit finding L6).
+        _require_vault_role()
+        user = frappe.session.user
+
+        denied = None
+        if not frappe.db.exists("Vault Space", vault_space):
+            denied = "no such space"
+        elif frappe.db.get_value("Vault Space", vault_space, "disabled"):
+            denied = "space is disabled"
+        else:
+            level = get_membership_level(user, vault_space)
+            if not is_vault_admin(user) and level not in ("Editor", "Manager"):
+                denied = "not an Editor of this space"
+
+        if denied:
+            if denied != "no such space":
+                # Logged where there is a real space to log against; a name that resolves
+                # to nothing is not an access attempt on anything.
+                write_access_log(
+                    None,
+                    action="import",
+                    outcome="denied",
+                    vault_space=vault_space,
+                    detail=denied,
+                )
+                frappe.db.commit()
             frappe.throw(
                 _("You need Editor access to this space to import credentials."),
                 frappe.PermissionError,

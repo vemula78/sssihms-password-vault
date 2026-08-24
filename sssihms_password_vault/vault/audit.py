@@ -27,6 +27,12 @@ ACTIONS: tuple[str, ...] = (
     "import",
     "membership",
     "health_report",
+    # Space lifecycle and configuration: creation, deletion, and a change to the
+    # `disabled` archival lock. Membership changes keep their own action above.
+    "space",
+    # Rotation-reminder digests. A digest carries credential titles and due dates to its
+    # recipients, so who received one is an access event like any other.
+    "reminder",
 )
 
 OUTCOMES: tuple[str, ...] = ("success", "denied")
@@ -96,9 +102,9 @@ def write_access_log(
             "field_label": field_label,
             "user": frappe.session.user,
             "timestamp": now(),
-            # Recorded for the "who and from where" half of an audit trail. Absent for
-            # scheduler and console callers, which have no HTTP request.
-            "ip_address": getattr(frappe.local, "request_ip", None),
+            # The "from where" half of the trail. Absent for scheduler and console
+            # callers, which have no HTTP request.
+            "ip_address": _client_ip(),
             "detail": (detail or "")[:_MAX_DETAIL] or None,
         }
     )
@@ -106,3 +112,26 @@ def write_access_log(
     # function can write it. See the module docstring.
     row.insert(ignore_permissions=True)
     return row
+
+
+def _client_ip() -> str | None:
+    """The caller's IP, with the real network peer alongside it when they differ.
+
+    ``frappe.local.request_ip`` is the first element of the caller's own
+    ``X-Forwarded-For`` header, unvalidated — so the person being audited can set it to
+    anything (audit finding M4). The socket peer (``request.remote_addr``) is whatever
+    actually opened the connection: behind a reverse proxy that is the proxy, which is
+    still a fact rather than an assertion.
+
+    Recording both, in one existing column, keeps the row honest without a schema change:
+    ``1.2.3.4 (peer 10.0.0.5)`` says plainly that the first value is client-asserted. When
+    they agree — or when there is no request at all — nothing extra is added.
+    """
+    asserted = getattr(frappe.local, "request_ip", None)
+    peer = None
+    request = getattr(frappe.local, "request", None)
+    if request is not None:
+        peer = getattr(request, "remote_addr", None)
+    if asserted and peer and asserted != peer:
+        return f"{asserted} (peer {peer})"[:140]
+    return asserted or peer

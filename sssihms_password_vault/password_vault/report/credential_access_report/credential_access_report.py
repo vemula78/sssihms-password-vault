@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import frappe
 from frappe import _
+from frappe.utils import escape_html
 
 from sssihms_password_vault.vault.audit import ACTIONS, OUTCOMES
 from sssihms_password_vault.vault.permissions import (
@@ -34,6 +35,16 @@ from sssihms_password_vault.vault.permissions import (
 
 #: A log query with no bound is a full table scan of the most sensitive table in the app.
 _PAGE_LENGTH = 2000
+
+#: Log columns whose content originated outside this app and is rendered as a `Data`
+#: column. Frappe's Data formatter does not escape HTML, and query-report cells are
+#: injected as markup (this report's own JS formatter returns a <span> to colour denied
+#: rows, which relies on exactly that). So a payload planted in a log row would execute in
+#: the session of whoever opens the report — a Vault Admin or Vault Auditor, the two most
+#: privileged vault identities (audit finding H1). `reveal_secret` now also rejects
+#: malformed field keys at the door; this is the second half of that fix, and it is the
+#: half that also covers rows written before the door was closed.
+_ESCAPED_FIELDS = ("credential_title", "field_label", "detail", "ip_address")
 
 
 def execute(filters: dict | None = None):
@@ -61,7 +72,7 @@ def execute(filters: dict | None = None):
         if allowed_spaces is not None and requested_space not in allowed_spaces:
             # Deliberately an empty result rather than an error: telling the caller that a
             # space exists but is out of scope is itself a disclosure.
-            return _columns(), []
+            return _columns(), [], None
         query_filters["vault_space"] = requested_space
 
     # Every remaining filter is validated against a fixed set or a Frappe type before it
@@ -99,10 +110,31 @@ def execute(filters: dict | None = None):
             "detail",
         ],
         order_by="timestamp desc",
-        limit_page_length=_PAGE_LENGTH,
+        # One more than the page length, so truncation can be detected and reported rather
+        # than silently changing what the log appears to say (audit finding M6). `limit`
+        # rather than `limit_page_length`, which is deprecated in Frappe 16.
+        limit=_PAGE_LENGTH + 1,
     )
 
-    return _columns(), rows
+    truncated = len(rows) > _PAGE_LENGTH
+    rows = rows[:_PAGE_LENGTH]
+
+    for row in rows:
+        for field in _ESCAPED_FIELDS:
+            if row.get(field):
+                row[field] = escape_html(row[field])
+
+    message = None
+    if truncated:
+        # An audit tool that silently drops rows lets "there is no record of X" be inferred
+        # from a truncated window. Say so instead.
+        message = _(
+            "Showing the {0} most recent matching rows. Older rows in this range are NOT "
+            "displayed — narrow the date range or add filters before concluding that an "
+            "event is absent from the log."
+        ).format(_PAGE_LENGTH)
+
+    return _columns(), rows, message
 
 
 def _columns() -> list[dict]:

@@ -10,10 +10,21 @@ from __future__ import annotations
 
 import frappe
 from frappe import _
+from frappe.utils import escape_html
 
 from sssihms_password_vault.vault.audit import write_access_log
 from sssihms_password_vault.vault.health import analyze, collect_uses
-from sssihms_password_vault.vault.permissions import get_membership_level, is_vault_admin
+from sssihms_password_vault.vault.permissions import (
+    get_membership_level,
+    is_vault_admin,
+    is_vault_auditor_only,
+    space_is_disabled,
+)
+
+#: Rendered as `Data` columns, which Frappe does not escape — see the same constant in
+#: credential_access_report.py. `title` comes from a credential an Editor controls and
+#: `field_label` from a child row they name, so both are user-authored (audit finding H1).
+_ESCAPED_FIELDS = ("title", "field_label")
 
 
 def execute(filters: dict | None = None):
@@ -23,9 +34,21 @@ def execute(filters: dict | None = None):
 
     # Re-check even though the report is role-gated (Vault Admin / Vault User only, per
     # vault_health.json) — a Vault User's report access is a ceiling, not a grant; a
-    # non-admin must still be a Manager of the one space they are asking about. Vault
-    # Auditor is excluded by the roles list itself, so there is nothing to re-check for
-    # that role here: it never reaches this function.
+    # non-admin must still be a Manager of the one space they are asking about.
+    #
+    # An auditor is NOT excluded by that roles list, contrary to what this comment used to
+    # claim (audit finding L2): `Vault User` is auto-granted to every space member, so an
+    # auditor who is also a space Manager passes both the roles list and the Manager check
+    # below. What actually stopped them was credential_has_permission returning False in
+    # the per-document loop, leaving `accessible` empty — the third mirror, two layers
+    # down. Deny explicitly here instead of depending on that: separation of duties should
+    # not be an emergent property of a loop.
+    if is_vault_auditor_only(user):
+        frappe.throw(
+            _("The Vault Auditor role cannot run the health report."),
+            frappe.PermissionError,
+        )
+
     if not is_vault_admin(user):
         if not vault_space:
             frappe.throw(_("Select a Vault Space to run this report."))
@@ -34,12 +57,25 @@ def execute(filters: dict | None = None):
                 _("Only a space Manager or Vault Admin can run this report."),
                 frappe.PermissionError,
             )
+        if space_is_disabled(vault_space):
+            # A disabled space is documented as read-only and reveal-free. The health
+            # report decrypts every secret in scope server-side to score it, so running it
+            # over an archived space is a reveal in all but name (audit finding L4). Vault
+            # Admin is exempt: archival is an admin policy, not a limit on the admin.
+            frappe.throw(
+                _("This space is disabled. Re-enable it to run the health report."),
+                frappe.PermissionError,
+            )
 
-    # get_all applies credential_query_conditions (the EXISTS-membership clause), so the
-    # name list is already scoped. The per-document pass below re-checks each one through
-    # frappe.has_permission — NOT frappe.get_doc, which is permission-free ORM access and
-    # filters nothing (a bug in the first version of this file: the try/except around
-    # get_doc could never fire). Never ignore_permissions anywhere in this path.
+    # frappe.get_all does NOT apply credential_query_conditions — it sets
+    # ignore_permissions=True unconditionally, so this list is every credential in scope of
+    # the filter regardless of who is asking. This comment used to claim the opposite
+    # (audit finding L1); the sibling access report states it correctly.
+    #
+    # The scoping is done entirely by the per-document frappe.has_permission below, which
+    # does route through credential_has_permission. Note that frappe.get_doc checks
+    # nothing, so the has_permission call is load-bearing and must stay ahead of it.
+    # Never ignore_permissions anywhere in this path.
     cred_filters = {"vault_space": vault_space} if vault_space else {}
     rows = frappe.get_all(
         "Vault Credential", filters=cred_filters, fields=["name", "vault_space"]
@@ -70,6 +106,11 @@ def execute(filters: dict | None = None):
             action="health_report",
             detail=f"scope={scope} score={result['summary']['score']}",
         )
+
+    for row in result["rows"]:
+        for field in _ESCAPED_FIELDS:
+            if row.get(field):
+                row[field] = escape_html(row[field])
 
     return _columns(), result["rows"], None, None, _report_summary(result["summary"])
 

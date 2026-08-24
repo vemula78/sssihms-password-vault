@@ -54,7 +54,9 @@ Field", row.name, "secret_value")`. Leakage surfaces closed explicitly:
 
 - No secret field ever has `in_list_view`, `in_standard_filter`, `in_global_search`, or
   `search_index`.
-- Every secret field carries `report_hide: 1`, `print_hide: 1`, `no_copy: 1`, `no_track: 1`
+- Every secret field carries `report_hide: 1`, `print_hide: 1`, `no_copy: 1`
+  (`no_track` is **not** a real Frappe 16 docfield property — version tracking is disabled
+  at the doctype level with `track_changes: 0`; see BRIEF §6)
   (belt-and-braces: Password values would only ever appear as asterisks in Versions/reports
   anyway, since the table column never holds plaintext).
 - The parent controller enforces that a row with `is_secret=1` has an empty `value` (the plain
@@ -129,7 +131,7 @@ No permissions array (child tables inherit the parent's).
 | username | Data | | | | | in_list_view |
 | url | Data | options: `URL` | | | | |
 | notes | Text | description: "Never put secrets here — this field is plaintext and appears in versions." | | | | |
-| password | Password | primary secret; counts toward health | | | 1 | no_track 1, report_hide 1, print_hide 1 |
+| password | Password | primary secret; counts toward health | | | 1 | report_hide 1, print_hide 1 (doctype `track_changes: 0`) |
 | secret_fields | Table | **Credential Secret Field** | | | | |
 | expiry_date | Date | credential/document expiry | | | | in_standard_filter |
 | rotation_due | Date | | | | | in_standard_filter, search_index |
@@ -188,7 +190,7 @@ non-admin).
 | is_masked | Check | show last-4 hint | | | | |
 | is_password | Check | counts toward health analysis | | | | |
 | value | Data | ONLY for `is_secret=0` rows | | | | |
-| secret_value | Password | ONLY for `is_secret=1` rows | | | 1 | no_track 1, report_hide 1, print_hide 1, never in_list_view |
+| secret_value | Password | ONLY for `is_secret=1` rows | | | 1 | report_hide 1, print_hide 1, never in_list_view (doctype `track_changes: 0`) |
 | masked_hint | Data | "•••• 1234", server-computed | | 1 | 1 | |
 | warning | Small Text | template warning text, informational | | | | |
 
@@ -491,7 +493,9 @@ class CredentialAccessLog(Document):
         #   >>> frappe.flags.vault_audit_delete_override = True
         #   >>> frappe.delete_doc("Credential Access Log", name)
         # The flag cannot be set over HTTP — no whitelisted method sets it —
-        # so the override requires shell access to the VM, which is the
+        # so the override requires System Manager plus either shell access or Script
+        # Manager (a Server Script of type API can set a flag and call delete_doc over
+        # HTTP — corrected 2026-08-24, audit L3), which is the
         # correct bar for destroying audit evidence.
         if not (
             "System Manager" in frappe.get_roles(frappe.session.user)
@@ -568,12 +572,23 @@ rendering, and export come free. A Page would re-implement all of that for no ga
 
 - Report roles: `Vault Admin`, `Vault User`. First lines of `execute(filters)` re-check:
   the `vault_space` filter is mandatory for non-admins and the caller must be `Manager` of it
-  (`get_membership_level`); Vault Admin may omit it for org-wide. Auditor is rejected
-  (report roles don't include Vault Auditor, and the check would deny anyway).
+  (`get_membership_level`); Vault Admin may omit it for org-wide. A disabled space is
+  refused for non-admins — the report decrypts everything in scope, so running it over an
+  archived space is a reveal in all but name.
+  **Corrected 2026-08-24 (audit L2):** the roles list does *not* exclude an auditor —
+  `Vault User` is auto-granted to every space member, so an auditor who is also a space
+  Manager passes both the roles list and the Manager check. `execute()` therefore denies
+  `is_vault_auditor_only` explicitly as its first act, rather than relying on the
+  per-document `has_permission` loop returning an empty set two layers downstream.
 - `execute()` (logic in `vault/health.py`, thin report wrapper around it):
-  1. `frappe.get_all("Vault Credential", filters=..., fields=["name"])` — deliberately
-     `get_all` on names then `get_doc` per credential so `has_permission`/query conditions
-     stay in force; never `ignore_permissions`.
+  1. `frappe.get_all("Vault Credential", filters=..., fields=["name"])` to get candidate
+     names, then an explicit `frappe.has_permission(..., doc=name, user=user)` per name.
+     **Corrected 2026-08-24 (audit L1):** this step used to claim that `get_all` applies
+     the query conditions and that `get_doc` keeps `has_permission` in force. Neither is
+     true — `frappe.get_all` sets `ignore_permissions=True` unconditionally, and
+     `frappe.get_doc` checks nothing. The per-name `has_permission` call is the *only*
+     thing scoping this report, which makes it load-bearing and not a belt-and-braces
+     re-check. Never `ignore_permissions` anywhere in this path.
   2. For each credential: decrypt parent `password` and every child row with
      `is_password=1` (and `is_secret=1`) via `get_decrypted_password`. Port of
      `health.ts::passwordUses`.

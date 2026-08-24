@@ -3,10 +3,10 @@ from __future__ import annotations
 import frappe
 from frappe import _
 from frappe.model.document import Document
-from frappe.utils import now
+from frappe.utils import cint, now
 
 from sssihms_password_vault.vault.audit import write_access_log
-from sssihms_password_vault.vault.permissions import LEVEL_RANK
+from sssihms_password_vault.vault.permissions import LEVEL_RANK, is_vault_admin
 
 VAULT_USER_ROLE = "Vault User"
 
@@ -18,9 +18,50 @@ class VaultSpace(Document):
     """
 
     def validate(self) -> None:
+        self._guard_disabled_flag()
         self._reject_duplicate_members()
         self._require_a_manager()
         self._stamp_new_members()
+
+    def _guard_disabled_flag(self) -> None:
+        """Only a Vault Admin may change the `disabled` archival lock.
+
+        A space Manager holds `write` on their own space so they can maintain its member
+        table — and nothing previously scoped *which* fields that write covered, so a
+        Manager could clear `disabled`, do the reveals and edits the flag exists to
+        prevent, and set it back (audit finding M7). The flag is enforced against exactly
+        the people who could turn it off, which made it advisory rather than a lock.
+
+        The change is logged either way: an archival state change is a security event, and
+        the denial is the more interesting of the two rows.
+        """
+        before = self.get_doc_before_save()
+        if before is None:
+            return
+        if cint(before.disabled) == cint(self.disabled):
+            return
+
+        new_state = "disabled" if cint(self.disabled) else "enabled"
+        if not is_vault_admin(frappe.session.user):
+            write_access_log(
+                None,
+                action="space",
+                outcome="denied",
+                vault_space=self.name,
+                detail=f"attempt to set space {new_state} (Vault Admin only)",
+            )
+            frappe.db.commit()
+            frappe.throw(
+                _("Only a Vault Admin can enable or disable a Vault Space."),
+                frappe.PermissionError,
+            )
+
+        write_access_log(
+            None,
+            action="space",
+            vault_space=self.name,
+            detail=f"space {new_state}",
+        )
 
     def _reject_duplicate_members(self) -> None:
         """Two rows for one user would make `get_membership_level` a max() over
@@ -60,6 +101,17 @@ class VaultSpace(Document):
                 continue
             row.added_by = frappe.session.user
             row.added_on = now()
+
+    def after_insert(self) -> None:
+        """Space creation is a security event: it is the unit of access scoping, and
+        nothing else in the log would otherwise record that it came into existence or who
+        made it (audit finding L11)."""
+        write_access_log(
+            None,
+            action="space",
+            vault_space=self.name,
+            detail=f"space created with {len(self.members)} member row(s)",
+        )
 
     def on_update(self) -> None:
         self._grant_vault_user_role()
@@ -136,6 +188,18 @@ class VaultSpace(Document):
                 ),
                 title=_("Vault Space"),
             )
+
+        # Deleting a space destroys its whole member table — every grant and revocation
+        # this log recorded — so the deletion itself has to be on record (audit finding
+        # L11). The row's `vault_space` Link dangles afterwards, which is the same
+        # deliberate arrangement `ignore_links_on_delete` makes for credentials: the log
+        # outlives what it logs.
+        write_access_log(
+            None,
+            action="space",
+            vault_space=self.name,
+            detail=f"space deleted ({len(self.members)} member row(s))",
+        )
 
 
 def member_levels(space: str) -> dict[str, str]:

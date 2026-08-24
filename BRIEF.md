@@ -53,7 +53,11 @@ encryption key) plus role-based permissions replace all of it.
    conditions + `has_permission` hooks enforce it at the ORM level, not just the UI.
 5. Append-only audit: access log rows can never be edited or deleted by anyone below
    System Manager, and even then it should require a deliberate override.
-6. No secret values in Frappe's standard Version history (no_track on secret fields) and
+6. No secret values in Frappe's standard Version history. **Amended 2026-08-24:** the
+   original wording named `no_track` on secret fields, which is unimplementable — `no_track`
+   is not a DocField property in Frappe 16. The requirement is met by `track_changes: 0` on
+   `Vault Credential` and `Credential Secret Field`, which stops any Version row being
+   written at all, and
    no secrets in error logs/tracebacks.
 7. Frappe framework rules: all queries through the ORM/QB (no raw SQL string interp),
    all RPC entry points `@frappe.whitelist()` with explicit permission checks (never

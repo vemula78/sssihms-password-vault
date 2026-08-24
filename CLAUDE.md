@@ -26,6 +26,24 @@ libsodium crypto, key hierarchy, vault file format, or sync protocol.
   re-checks permission server-side, writes the access-log row **and commits it** before
   decrypting, and is rate-limited. That order is load-bearing — a log row for a reveal that
   then failed is acceptable; a reveal with no log row is not.
+- The door's gate order is also load-bearing: **vault role → existence → budget →
+  input validation → membership → unknown-field**, all before any log row. A nonexistent
+  credential must answer exactly like an inaccessible one (existence is not public), and
+  `field_key` must match `_FIELD_KEY_RE` at the door — not merely be escaped at render
+  time, because the log is permanent and an escaped payload is still a payload in the table.
+- **Rate limiting is per authenticated user**, counted from the access log in
+  `_enforce_reveal_budget`. Frappe's `@rate_limit` is an outer guard only and is not a
+  limit on its own: its bucket is `frappe.local.request_ip`, which is the caller's own
+  unvalidated `X-Forwarded-For`, and its cache key embeds `form_dict.cmd`, which `/api/v2`
+  never sets. Do not "simplify" this back to the decorator.
+- **Anything rendered into a report is escaped server-side** (`_ESCAPED_FIELDS` in both
+  report modules). Frappe's `Data` formatter does not escape HTML and query-report cells are
+  injected as markup — the access report's own JS formatter returns a `<span>` and depends
+  on that.
+- **Frappe document sharing can grant past these hooks.** It is evaluated after a
+  `has_permission` denial and is OR-ed over `permission_query_conditions`, auditor `1=0`
+  included. `share` is off in both DocPerms and `block_vault_docshare` refuses the DocShare
+  row; a System Manager still holds share rights by default, so the hook is the real guard.
 - `frappe.client.get_password` is a **framework** route that would return a vault secret with
   no audit row. It is closed by `override_whitelisted_methods` in `hooks.py` →
   `vault.api.get_password_override`. Do not remove that hook. It only intercepts the HTTP
@@ -35,13 +53,19 @@ libsodium crypto, key hierarchy, vault file format, or sync protocol.
 - **Auditors never read credentials.** `Vault Auditor` is a *disqualification*, not merely an
   absence of grant — it holds even for an auditor who also has `Vault User` and a space
   membership, because `Vault User` is auto-assigned the moment anyone joins a space. Enforced
-  in three mirrored places (`credential_query_conditions` returns `1=0`,
-  `credential_has_permission` returns `False`, and `reveal_secret` denies); all three must
-  agree. `Vault Admin` wins over auditor-ness.
+  in **five** places that must agree: `credential_query_conditions` returns `1=0`,
+  `credential_has_permission` returns `False`, `reveal_secret` denies, `vault_health.execute`
+  throws, and the rotation digest drops auditors from its recipients. The last two are there
+  because the first three are hooks, and neither the report's role list nor a scheduler job
+  running as Administrator ever consults a hook — that is the shape of every auditor leak
+  found so far. `Vault Admin` wins over auditor-ness.
 - The access log is append-only: no role has create/write/delete DocPerms, the controller's
   `validate()` throws on re-save, and rows must outlive the credential they log
   (`ignore_links_on_delete` in `hooks.py`). Deleting a credential that was ever revealed
   would otherwise fail Frappe's link check.
+- Only a **Vault Admin** may change `Vault Space.disabled`. A Manager holds `write` on the
+  space for its member table, and `disabled` is enforced against exactly the people who
+  could otherwise clear it, do the reveals it forbids, and set it back.
 - `track_changes` is **0** on `Vault Credential` and `Credential Secret Field`. `no_track` is
   not a real Frappe 16 docfield property — disabling version tracking on the doctype is the
   actual defence, so no Version row can ever carry a secret regardless of Frappe's masking
@@ -71,8 +95,13 @@ bench --site testspv.local migrate && bench --site testspv.local clear-cache
 bench execute sssihms_password_vault.vault.reminders.daily_rotation_sweep
 ```
 
-Full green is **80 tests**: 52 pure + 21 credential + 7 access-log. `clear-cache` after
-copying files in, or `hooks.py` changes (including the override) will not be picked up.
+Full green is **92 tests**: 52 pure + 31 credential + 7 access-log + 2 vault-space.
+`clear-cache` after copying files in, or `hooks.py` changes (the override and the new
+`doc_events` DocShare guard) will not be picked up.
+
+The 40 site-dependent tests include 12 written against the 2026-08-24 audit fixes that have
+**never been executed** — see `NOTES/audit-fixes-2026-08-24.md` for what to distrust until
+they run.
 
 ## Architecture
 

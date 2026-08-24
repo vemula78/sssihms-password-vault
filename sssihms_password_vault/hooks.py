@@ -35,6 +35,17 @@ override_whitelisted_methods = {
     "frappe.client.get_password": "sssihms_password_vault.vault.api.get_password_override",
 }
 
+# Frappe's document sharing is evaluated AFTER a has_permission denial and is OR-ed over
+# permission_query_conditions, so a single DocShare row would overturn both membership
+# hooks — including the auditor's `1=0` separation-of-duties lock. The `share` DocPerm has
+# been dropped from Vault Credential and Vault Space, but System Manager retains share
+# rights by default, so the grant is refused at the DocShare doctype itself.
+doc_events = {
+    "DocShare": {
+        "validate": "sssihms_password_vault.vault.permissions.block_vault_docshare",
+    },
+}
+
 # Credential Access Log is an append-only audit trail and must outlive the credential it
 # logs. Without this exemption Frappe's own delete-link check would block deleting *any*
 # credential that has ever been revealed once, since the log row's `credential` Link field

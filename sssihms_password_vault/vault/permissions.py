@@ -15,6 +15,14 @@ denied.
 Frappe controllers and hooks can only ever *deny*, never grant beyond the role-based
 DocPerm rows. Everything here therefore narrows the ``Vault User`` ceiling declared in the
 doctype JSON; it cannot widen anything.
+
+One exception, and it is not in these hooks but in the framework around them: **document
+sharing is evaluated after a controller denial and can grant.** A DocShare row overturns
+both halves of this file — ``has_permission`` falls back to ``false_if_not_shared()``, and
+list queries OR the shared-name set over the query condition, including the auditor's
+``1=0``. That is why ``block_vault_docshare`` at the bottom of this module exists and why
+the ``share`` DocPerm has been removed from both doctypes (audit finding M1, 2026-08-24).
+Do not read the paragraph above as "nothing can widen this" without it.
 """
 
 from __future__ import annotations
@@ -259,3 +267,46 @@ def space_has_permission(doc, ptype: str | None = None, user: str | None = None,
     if ptype == "write":
         return get_membership_level(user, space) == "Manager"
     return False
+
+
+# ------------------------------------------------------------------ document sharing
+
+
+#: Doctypes that may never be shared through Frappe's DocShare mechanism.
+_UNSHAREABLE = frozenset({"Vault Credential", "Vault Space", "Credential Access Log"})
+
+
+def block_vault_docshare(doc, method=None) -> None:
+    """Refuse any DocShare row targeting a vault doctype (``doc_events`` in hooks.py).
+
+    The module docstring above says controllers and hooks can only ever deny, never grant.
+    That is true of these hooks — but it is not true of the permission system as a whole,
+    and the exception lands exactly here (audit finding M1). Frappe consults document
+    sharing *after* a controller denial and lets it grant:
+
+    * ``has_permission`` → ``if not perm and not ignore_share_permissions: perm =
+      false_if_not_shared()``, so a share overturns ``credential_has_permission``
+      returning False;
+    * list and report queries OR the shared-name set over the hook's condition, so a share
+      overturns ``credential_query_conditions`` — including the ``1=0`` that is the whole
+      of the auditor's separation-of-duties lock.
+
+    ``frappe.share.add`` is whitelisted and takes an ``everyone`` flag, so a single call
+    could have made one credential's row and fields readable by every authenticated
+    account on the site, auditors included, with no access-log row for the grant. Secrets
+    themselves stayed behind ``reveal_secret``, which checks membership independently — but
+    titles, usernames, URLs and the plaintext notes field did not.
+
+    Access to this app is membership, full stop. There is no legitimate reason to hand a
+    credential to a non-member, and the ``share`` DocPerm has been removed from both
+    doctypes; this guard is what makes that removal load-bearing rather than cosmetic,
+    because a System Manager still holds share rights by default.
+    """
+    share_doctype = doc.get("share_doctype")
+    if share_doctype in _UNSHAREABLE:
+        frappe.throw(
+            frappe._("{0} cannot be shared. Access is granted through Vault Space membership.").format(
+                frappe._(share_doctype)
+            ),
+            frappe.PermissionError,
+        )

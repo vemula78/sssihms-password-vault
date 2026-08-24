@@ -14,6 +14,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from sssihms_password_vault.vault.api import reveal_secret
+from sssihms_password_vault.vault.audit import write_access_log
 from sssihms_password_vault.vault.permissions import get_membership_level
 
 SPACE = "Test Space — Vault Credential"
@@ -24,6 +25,9 @@ EDITOR = "vault-editor@example.test"
 MANAGER = "vault-manager@example.test"
 OUTSIDER = "vault-outsider@example.test"
 AUDITOR = "vault-auditor@example.test"
+#: No roles at all — the case the pre-existing OUTSIDER fixture deliberately does not
+#: cover, and the one the reveal door was open to.
+NOROLE = "vault-norole@example.test"
 
 
 def _ensure_user(email: str, roles: tuple[str, ...] = ()) -> None:
@@ -321,3 +325,158 @@ class TestVaultCredential(FrappeTestCase):
         can ever carry a secret field regardless of Frappe's masking internals."""
         meta = frappe.get_meta("Vault Credential")
         self.assertFalse(meta.track_changes)
+
+    # -------------------------------------- independent audit (2026-08-24) regressions
+
+    def test_reveal_requires_a_vault_role(self):
+        """H3/T9: an authenticated account with no vault role at all must be refused
+        before anything is resolved, and must not be able to write a log row.
+
+        NOROLE is created without roles on purpose — the opposite of OUTSIDER, who carries
+        Vault User deliberately. The old code let any account probe sequential VC-#####
+        names, learn which existed, and commit one attacker-authored row per probe."""
+        _ensure_user(NOROLE)
+        cred = self._make_credential(title="No Role Test")
+        before = frappe.db.count("Credential Access Log", {"credential": cred.name})
+        frappe.set_user(NOROLE)
+        with self.assertRaises(frappe.PermissionError):
+            reveal_secret(cred.name, "password")
+        frappe.set_user("Administrator")
+        self.assertEqual(
+            frappe.db.count("Credential Access Log", {"credential": cred.name}), before
+        )
+
+    def test_nonexistent_credential_answers_like_an_inaccessible_one(self):
+        """H3: existence must not be observable. A bogus name and a real-but-forbidden one
+        both raise PermissionError, and neither writes a row."""
+        frappe.set_user(MANAGER)
+        with self.assertRaises(frappe.PermissionError):
+            reveal_secret("VC-99999999", "password")
+        frappe.set_user("Administrator")
+
+    def test_malformed_field_key_is_rejected_and_never_stored_verbatim(self):
+        """H1: a field key is a template identifier. Markup in it used to reach the log
+        verbatim and then render, unescaped, in the report an admin or auditor opens."""
+        cred = self._make_credential(title="Field Key Injection Test")
+        payload = "<img src=x onerror=alert(1)>"
+        frappe.set_user(MANAGER)
+        with self.assertRaises(frappe.PermissionError):
+            reveal_secret(cred.name, payload)
+        frappe.set_user("Administrator")
+        rows = frappe.get_all(
+            "Credential Access Log",
+            filters={"credential": cred.name, "outcome": "denied"},
+            fields=["field_key", "field_label", "detail"],
+        )
+        self.assertTrue(rows)
+        for row in rows:
+            for value in (row.field_key, row.field_label, row.detail):
+                self.assertNotIn("<", value or "")
+
+    def test_unknown_field_key_is_logged_as_denied_not_success(self):
+        """M5: a well-formed but nonexistent field key used to commit an
+        `outcome="success"` row — permanently, in an append-only table — for a reveal that
+        returned nothing and never could."""
+        cred = self._make_credential(title="Unknown Field Test")
+        frappe.set_user(MANAGER)
+        with self.assertRaises(frappe.PermissionError):
+            reveal_secret(cred.name, "no_such_field")
+        frappe.set_user("Administrator")
+        rows = frappe.get_all(
+            "Credential Access Log",
+            filters={"credential": cred.name, "field_key": "no_such_field"},
+            fields=["outcome", "detail"],
+        )
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertEqual(row.outcome, "denied")
+
+    def test_access_report_escapes_log_content(self):
+        """H1/T2: whatever is in the log, the report must not hand markup to the browser.
+        Covers rows written before the door-level check existed."""
+        cred = self._make_credential(title="Report Escaping Test")
+        write_access_log(
+            cred,
+            action="reveal",
+            outcome="denied",
+            field_key="password",
+            field_label="<img src=x onerror=alert(1)>",
+            detail="<script>alert(2)</script>",
+        )
+        frappe.db.commit()
+        from sssihms_password_vault.password_vault.report.credential_access_report import (
+            credential_access_report,
+        )
+
+        result = credential_access_report.execute({"credential": cred.name})
+        rows = result[1]
+        self.assertTrue(rows)
+        for row in rows:
+            for field in ("field_label", "detail", "credential_title"):
+                self.assertNotIn("<", row.get(field) or "")
+
+    def test_docshare_cannot_grant_credential_access(self):
+        """M1/T3: Frappe evaluates document sharing after a has_permission denial and ORs
+        the shared set over permission_query_conditions — so a DocShare row would overturn
+        both membership hooks, including the auditor's 1=0 lock. It must be refused."""
+        cred = self._make_credential(title="DocShare Test")
+        _ensure_user(NOROLE)
+        with self.assertRaises(frappe.PermissionError):
+            frappe.share.add("Vault Credential", cred.name, NOROLE, read=1)
+        frappe.set_user(NOROLE)
+        self.assertEqual(frappe.get_list("Vault Credential", pluck="name"), [])
+        frappe.set_user("Administrator")
+
+    def test_share_docperm_is_off(self):
+        """M1: the guard above is what makes this stick, but the DocPerm should not offer
+        `share` in the first place."""
+        for doctype in ("Vault Credential", "Vault Space"):
+            for perm in frappe.get_meta(doctype).permissions:
+                self.assertFalse(perm.share, f"{doctype} still grants share to {perm.role}")
+
+    def test_only_vault_admin_can_change_the_disabled_flag(self):
+        """M7/T8: `disabled` is enforced against exactly the people who could turn it off.
+        A space Manager holds write on their space for the member table; that write must not
+        extend to the archival lock."""
+        space = frappe.get_doc("Vault Space", SPACE)
+        frappe.set_user(MANAGER)
+        space.disabled = 1
+        with self.assertRaises(frappe.PermissionError):
+            space.save()
+        frappe.set_user("Administrator")
+        self.assertFalse(frappe.db.get_value("Vault Space", SPACE, "disabled"))
+
+    def test_get_password_override_is_actually_wired(self):
+        """T1: the existing bypass test calls get_password_override directly, so it passes
+        even with the hooks.py entry deleted — which is the regression it was written to
+        catch. Assert the wiring itself."""
+        self.assertEqual(
+            frappe.override_whitelisted_method("frappe.client.get_password"),
+            "sssihms_password_vault.vault.api.get_password_override",
+        )
+
+    def test_child_row_get_password_bypass_is_logged(self):
+        """M8: the child-row path is the more targeted bypass — every non-login template
+        keeps its secrets in Credential Secret Field rows — and it was refused with nothing
+        on record, despite the comment claiming a parent lookup."""
+        cred = self._make_credential(
+            title="Child Row Bypass Test",
+            credential_type="netbanking",
+            secret_fields=[
+                {
+                    "field_key": "customerId",
+                    "label": "Customer ID",
+                    "is_secret": 1,
+                    "secret_value": "CID-987654",
+                }
+            ],
+        )
+        row_name = cred.secret_fields[0].name
+        before = frappe.db.count("Credential Access Log", {"credential": cred.name})
+        from sssihms_password_vault.vault.api import get_password_override
+
+        with self.assertRaises(frappe.PermissionError):
+            get_password_override("Credential Secret Field", row_name, "secret_value")
+        self.assertGreater(
+            frappe.db.count("Credential Access Log", {"credential": cred.name}), before
+        )

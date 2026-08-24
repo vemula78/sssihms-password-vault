@@ -28,16 +28,19 @@ class CredentialAccessLog(Document):
             frappe.throw(_("Access log rows cannot be modified."), frappe.PermissionError)
 
     def on_trash(self) -> None:
-        # The System Manager override is deliberate and console-only:
+        # The System Manager override is deliberate:
         #
         #     bench --site <site> console
         #     >>> frappe.flags.vault_audit_delete_override = True
         #     >>> frappe.delete_doc("Credential Access Log", name)
         #
-        # The flag cannot be set over HTTP — no whitelisted method in this app sets it —
-        # so the override requires shell access to the VM, which is the correct bar for
-        # destroying audit evidence. Bulk delete from the list view routes through
-        # on_trash per row and so hits the same block.
+        # No whitelisted method in this app sets the flag. That is not the same as "the
+        # flag cannot be set over HTTP", which this comment used to claim (audit finding
+        # L3, 2026-08-24): a System Manager who also holds Script Manager can set it from
+        # a Server Script of type API without touching a shell. The real bar is therefore
+        # System Manager plus either shell access or Script Manager — still the right bar
+        # for destroying audit evidence, but not the one stated. Bulk delete from the list
+        # view routes through on_trash per row and so hits the same block.
         if not (
             "System Manager" in frappe.get_roles(frappe.session.user)
             and frappe.flags.get("vault_audit_delete_override")
