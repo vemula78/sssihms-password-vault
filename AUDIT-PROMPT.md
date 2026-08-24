@@ -92,8 +92,41 @@ Running tests locally, no bench required:
 python3 -m unittest discover -s sssihms_password_vault/vault/tests   # 52 pure tests
 ```
 
-The doctype/permission/audit suites need a real site
-(`bench --site <site> run-tests --module ...`); full green is 80 tests. If you cannot run
-those, review them by reading and say which of your findings are unverified as a result.
+That covers 52 of the 80 tests. The remaining 28 — the doctype, permission and audit
+suites — need a real Frappe site, so on a laptop with no bench they cannot run. Review those
+by reading, and state plainly which of your findings are unverified as a result.
+
+If you do have access to the evaluation bench, run them there. It is
+`sssihms-web-vm2023`, bench root `/home/azureuser/frappe_docker`, compose file `pwd.yml`,
+Frappe 16.31 / ERPNext 16.32, site `frontend` — an evaluation site holding **synthetic data
+only**. The app lives in the writable layer of five app containers (`backend`, `queue-short`,
+`queue-long`, `scheduler`, `websocket`); `backend` is the one to run tests in:
+
+```bash
+cd /home/azureuser/frappe_docker
+docker compose -f pwd.yml exec -T -w /home/frappe/frappe-bench backend bash -lc \
+  'bench --site frontend run-tests --app sssihms_password_vault'
+
+# a single suite
+docker compose -f pwd.yml exec -T -w /home/frappe/frappe-bench backend bash -lc \
+  'bench --site frontend run-tests --module sssihms_password_vault.password_vault.doctype.vault_credential.test_vault_credential'
+```
+
+Full green is **80 tests**: 52 pure + 21 credential + 7 access-log.
+
+Bench rules while auditing:
+
+- Read freely; you may create test users, spaces and synthetic credentials. Never put a real
+  credential into that site.
+- Do not install the app on any other site on that VM — several unrelated production
+  hospital apps share the bench (`sssihms_hr`, `hospital_ops`, `facility_management`,
+  `patient_ticketing`, `trust_compliance`), and the sites they serve are live.
+- Do not restart containers, run `bench migrate` on another site, or touch Apache. If a
+  finding needs a restart to demonstrate, describe the reproduction instead and say so.
+- `bench console` proves nothing about the whitelist and override layer — exercise the HTTP
+  path for anything in that class (an authenticated API request against the site), then
+  revoke any API key you created.
+- Anything you learn about the other apps on that bench is out of scope for this audit and
+  should not appear in the report.
 
 Do not change any code. Produce findings only.
