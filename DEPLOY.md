@@ -9,36 +9,91 @@ and the app must be present in all five app containers or background jobs crash-
 
 ## Install / update
 
-```bash
-cd /home/azureuser/frappe_docker
+**`git clone` inside the containers does not work.** The repo is private and the containers
+hold no GitHub credentials, so the clone prompts for a username and fails — the procedure
+this file used to document could never have run. (Found the hard way on 24-Aug-2026, after
+it had already `rm -rf`'d the app in all five containers.) The alternatives are a deploy key
+or PAT baked into five containers, which puts a credential where it does not belong, or
+shipping an archive of a known commit — which is what this does.
 
-# 1. Fetch/refresh source in ALL FIVE app containers
+Deploy from a local clone, from the commit you intend to ship:
+
+```bash
+# On the Mac, in the repo:
+git archive --format=tar.gz --prefix=sssihms_password_vault/ -o /tmp/spv.tar.gz HEAD
+scp -i ~/Downloads/sssihms-web-vm2023_key.pem -P 2222 /tmp/spv.tar.gz \
+    azureuser@20.219.253.136:/tmp/spv.tar.gz
+```
+
+```bash
+# On the VM:
+cd /home/azureuser/frappe_docker
 for c in backend queue-short queue-long scheduler websocket; do
-  docker compose -f pwd.yml exec -T -w /home/frappe/frappe-bench $c bash -lc \
-    'rm -rf apps/sssihms_password_vault && \
-     git clone --depth 1 https://github.com/vemula78/sssihms-password-vault apps/sssihms_password_vault && \
-     env/bin/pip install -q -e apps/sssihms_password_vault'
+  docker cp /tmp/spv.tar.gz "frappe_docker-${c}-1:/tmp/spv.tar.gz"
+  docker compose -f pwd.yml exec -T -w /home/frappe/frappe-bench "$c" bash -lc '
+    rm -rf apps/sssihms_password_vault
+    tar xzf /tmp/spv.tar.gz -C apps/
+    env/bin/pip install -q -e apps/sssihms_password_vault
+    rm -f /tmp/spv.tar.gz'
 done
 
-# 2. Register + install on the site (backend only)
+# First install only — register the app on the site:
 docker compose -f pwd.yml exec -T -w /home/frappe/frappe-bench backend bash -lc '
   grep -qx sssihms_password_vault sites/apps.txt || echo sssihms_password_vault >> sites/apps.txt
-  bench --site frontend install-app sssihms_password_vault
-  bench --site frontend migrate
-'
+  bench --site frontend install-app sssihms_password_vault'
 
-# 3. Restart workers so all containers pick up the code
+# Every deploy — BOTH sites, and migrate is not optional when a doctype JSON changed:
+docker compose -f pwd.yml exec -T -w /home/frappe/frappe-bench backend bash -lc '
+  bench --site frontend migrate && bench --site frontend clear-cache
+  bench --site testspv.local migrate && bench --site testspv.local clear-cache'
+
 docker compose -f pwd.yml restart backend queue-short queue-long scheduler websocket
 ```
 
-Update = same steps (clone is idempotent via rm -rf; `install-app` is replaced by
-`bench --site frontend migrate` once installed).
+`pip install -e` only needs re-running when dependencies or entry points change; the
+extract alone is enough for a pure code change, since the install is editable and points at
+the same path.
+
+**Migrate both sites, and migrate them after the code is in place.** A Select option added
+to a doctype JSON does not reach the database until `migrate` runs, and a stale Select fails
+at *insert* time — inside a controller `validate()`, which turns a logged security event
+into a hard error on an unrelated save. Getting this out of order on 24-Aug-2026 broke Vault
+Space creation on `frontend` while the tests passed on `testspv.local`.
+
+Verify the app is actually present in all five, not just backend:
+
+```bash
+for c in backend queue-short queue-long scheduler websocket; do
+  printf "%-12s " "$c"
+  docker compose -f pwd.yml exec -T -w /home/frappe/frappe-bench "$c" \
+    bash -lc 'env/bin/python -c "import sssihms_password_vault" && echo ok || echo MISSING'
+done
+```
+
+Use `env/bin/python`, not `python` — the bare interpreter is the system one and will report
+the module missing even on a perfectly good install.
 
 ## Tests on the bench
 
+**Run tests on `testspv.local`, never on `frontend`.** `frontend` has ERPNext installed, and
+ERPNext's `before_tests` hook bootstraps master data including a fiscal year — which
+collides with the fiscal years already on that site and aborts the whole run before a single
+test executes. `testspv.local` carries frappe plus this app only, so there is no bootstrap
+to collide.
+
 ```bash
 docker compose -f pwd.yml exec -T -w /home/frappe/frappe-bench backend bash -lc \
-  'bench --site frontend run-tests --app sssihms_password_vault'
+  'bench --site testspv.local run-tests --app sssihms_password_vault'
+```
+
+Full green is **94 tests**: 54 pure + 31 credential + 7 access-log + 2 vault-space.
+`--app` runs the site suites and the pure suites as two batches (40 then 54).
+
+Individual modules:
+
+```bash
+docker compose -f pwd.yml exec -T -w /home/frappe/frappe-bench backend bash -lc \
+  'bench --site testspv.local run-tests --module sssihms_password_vault.password_vault.doctype.vault_credential.test_vault_credential'
 ```
 
 ## Never

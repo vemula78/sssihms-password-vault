@@ -65,7 +65,7 @@ bench --site <site> run-tests --module sssihms_password_vault.password_vault.doc
 python3 -m unittest discover -s sssihms_password_vault/vault/tests
 ```
 
-Full green is 92 tests: 52 pure + 31 credential + 7 access-log + 2 vault-space.
+Full green is 94 tests: 54 pure + 31 credential + 7 access-log + 2 vault-space.
 
 ## Documents
 

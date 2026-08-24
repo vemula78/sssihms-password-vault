@@ -78,7 +78,7 @@ Local, no bench needed — the pure-logic modules (`generator`, `health`, `csv_i
 `try/except ImportError` specifically so this works:
 
 ```bash
-python3 -m unittest discover -s sssihms_password_vault/vault/tests   # 52 tests
+python3 -m unittest discover -s sssihms_password_vault/vault/tests   # 54 tests
 python3 -m py_compile $(find sssihms_password_vault -name '*.py')
 ```
 
@@ -89,19 +89,20 @@ On the bench (`sssihms-web-vm2023`, `/home/azureuser/frappe_docker`, `pwd.yml`) 
 doctype/permission/audit suites need a real site:
 
 ```bash
-bench --site testspv.local run-tests --app sssihms_password_vault        # pure logic
+bench --site testspv.local run-tests --app sssihms_password_vault        # all 94
 bench --site testspv.local run-tests --module sssihms_password_vault.password_vault.doctype.vault_credential.test_vault_credential
 bench --site testspv.local migrate && bench --site testspv.local clear-cache
 bench execute sssihms_password_vault.vault.reminders.daily_rotation_sweep
 ```
 
-Full green is **92 tests**: 52 pure + 31 credential + 7 access-log + 2 vault-space.
+Full green is **94 tests**: 54 pure + 31 credential + 7 access-log + 2 vault-space.
 `clear-cache` after copying files in, or `hooks.py` changes (the override and the new
 `doc_events` DocShare guard) will not be picked up.
 
-The 40 site-dependent tests include 12 written against the 2026-08-24 audit fixes that have
-**never been executed** — see `NOTES/audit-fixes-2026-08-24.md` for what to distrust until
-they run.
+Run site tests on **`testspv.local`**, not `frontend`: ERPNext's `before_tests` hook
+bootstraps a fiscal year that collides with the ones already on `frontend` and aborts the
+run before any test executes. `testspv.local` is frappe + this app only. All 94 were
+verified green on the bench on 24-Aug-2026.
 
 ## Architecture
 

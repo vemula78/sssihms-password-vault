@@ -91,19 +91,31 @@ which is what actually prevents a Version row.
 - **L18/L19** are cosmetic: two unreachable entries in `_READ_PTYPES`, and a Vault Space
   rename from the desk that silently does nothing.
 
-## Verification status — read this before trusting the fixes
+## Verification status
 
-The pure suite (52 tests) passes and every module compiles. **The site-dependent tests were
-written but never executed** — this machine has no bench, and the fixes touch exactly the
-paths those tests cover. Ten new tests in `test_vault_credential.py` and two in the new
-`test_vault_space.py` are therefore unproven, and so is the runtime behaviour of every
-change above. Run them on the bench before believing any of it:
+All **94 tests green on the bench** (`testspv.local`, 24-Aug-2026): 54 pure + 31 credential
++ 7 access-log + 2 vault-space. The 12 tests written against these fixes were executed and
+pass, including the two that prove the auditor paths — an auditor-Manager receives no
+rotation digest, and cannot run the health report.
 
-```bash
-bench --site <site> run-tests --app sssihms_password_vault
-```
+End-to-end on the live evaluation site (`frontend`): space creation logs both a `membership`
+and a `space` row, a reveal returns the correct plaintext and logs `success`, and a
+markup-bearing `field_key` is refused and logged as `(malformed)` rather than verbatim.
 
-Specific things most likely to fail first on a real site: `frappe.RateLimitExceededError`
-existing under that name, `frappe.db.count` accepting the list-filter form used in
-`_enforce_reveal_budget`, `escape_html` being importable from `frappe.utils`, and the
-`Notification Log` subject filter in the digest test.
+Two things the deploy taught, both now in DEPLOY.md:
+
+- **`git clone` in the containers cannot work** — the repo is private and the containers hold
+  no credentials. DEPLOY.md documented that procedure and it had evidently never been run.
+  Deploys go by `git archive` of a known commit.
+- **Migrate every site, after the code is in place.** A Select option added to a doctype JSON
+  does not reach the database until `migrate` runs, and a stale Select fails at *insert* —
+  inside a controller `validate()`, so a logged security event becomes a hard error on an
+  unrelated save. This is exactly what the new `space` and `reminder` actions did: green on
+  `testspv.local`, Vault Space creation broken on `frontend`, until the second migrate.
+  `test_audit_actions.py` now asserts tuple/Select parity as a pure test, so the next
+  divergence fails before a deploy rather than during one.
+
+Also worth knowing: **site tests must run on `testspv.local`, not `frontend`.** ERPNext's
+`before_tests` hook bootstraps a fiscal year that collides with the ones already on
+`frontend` and aborts the run before any test executes — which means the "80 tests green"
+this repo previously claimed had never been verified on that site.
