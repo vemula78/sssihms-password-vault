@@ -1,0 +1,79 @@
+{
+ "actions": [],
+ "creation": "2026-08-24 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "rotation_reminders_enabled",
+  "reminder_repeat_days",
+  "reveal_auto_hide_seconds",
+  "default_password_length",
+  "default_passphrase_words"
+ ],
+ "fields": [
+  {
+   "default": "1",
+   "description": "Master switch for the daily rotation-reminder sweep.",
+   "fieldname": "rotation_reminders_enabled",
+   "fieldtype": "Check",
+   "label": "Rotation Reminders Enabled"
+  },
+  {
+   "default": "7",
+   "description": "How often to re-notify a space's managers while a credential stays overdue.",
+   "fieldname": "reminder_repeat_days",
+   "fieldtype": "Int",
+   "label": "Reminder Repeat (days)"
+  },
+  {
+   "default": "30",
+   "description": "The form re-masks a revealed secret after this many seconds. A client-side convenience, not a security control.",
+   "fieldname": "reveal_auto_hide_seconds",
+   "fieldtype": "Int",
+   "label": "Reveal Auto-hide (seconds)"
+  },
+  {
+   "default": "20",
+   "fieldname": "default_password_length",
+   "fieldtype": "Int",
+   "label": "Default Password Length"
+  },
+  {
+   "default": "5",
+   "fieldname": "default_passphrase_words",
+   "fieldtype": "Int",
+   "label": "Default Passphrase Words"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-08-24 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Password Vault",
+ "name": "Vault Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "email": 1,
+   "permlevel": 0,
+   "print": 1,
+   "read": 1,
+   "role": "Vault Admin",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "permlevel": 0,
+   "read": 1,
+   "role": "Vault User"
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
