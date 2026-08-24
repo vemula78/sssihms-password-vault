@@ -56,9 +56,15 @@ the backend **and** the queue-short, queue-long, scheduler and websocket contain
 
 ```bash
 bench --site <site> run-tests --app sssihms_password_vault
-# pure logic (generator, health scoring, CSV parsing) also runs without a bench:
-python -m pytest sssihms_password_vault/vault/tests/
+# and the doctype/permission/audit suites, which need a site:
+bench --site <site> run-tests --module sssihms_password_vault.password_vault.doctype.vault_credential.test_vault_credential
+bench --site <site> run-tests --module sssihms_password_vault.password_vault.doctype.credential_access_log.test_credential_access_log
+
+# pure logic (generator, health scoring, CSV parsing, wordlist) also runs without a bench:
+python3 -m unittest discover -s sssihms_password_vault/vault/tests
 ```
+
+Full green is 80 tests: 52 pure + 21 credential + 7 access-log.
 
 ## Documents
 
