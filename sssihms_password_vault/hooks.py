@@ -25,6 +25,16 @@ permission_query_conditions = {
     "Vault Space": "sssihms_password_vault.vault.permissions.space_query_conditions",
 }
 
+# Close the framework's own password-retrieval RPC (frappe.client.get_password), which
+# would otherwise hand back a decrypted secret with NO access-log row, bypassing the entire
+# reveal audit + rate limit (Codex finding #1). The override refuses outright for any Vault
+# doctype and points the caller at the audited reveal_secret endpoint; every other doctype
+# falls through to the stock implementation. Registered here so it applies to the HTTP route,
+# not just direct Python callers.
+override_whitelisted_methods = {
+    "frappe.client.get_password": "sssihms_password_vault.vault.api.get_password_override",
+}
+
 # Credential Access Log is an append-only audit trail and must outlive the credential it
 # logs. Without this exemption Frappe's own delete-link check would block deleting *any*
 # credential that has ever been revealed once, since the log row's `credential` Link field

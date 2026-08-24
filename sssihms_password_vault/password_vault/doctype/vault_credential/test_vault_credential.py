@@ -273,3 +273,51 @@ class TestVaultCredential(FrappeTestCase):
         frappe.delete_doc("Vault Credential", cred.name)
         rows = frappe.get_all("Credential Access Log", filters={"credential": cred.name})
         self.assertGreater(len(rows), 0)
+
+    # ------------------------------------------------ Codex audit regressions
+
+    def test_auditor_member_cannot_read_credentials(self):
+        """Codex finding #2: an auditor who is also a space member (AUDITOR is a Reader in
+        SPACE) must still be denied every credential read — at the ORM layer, not just in
+        reveal_secret. Separation of duties holds regardless of membership."""
+        cred = self._make_credential(title="Auditor Member Read Test")
+        self.assertFalse(
+            frappe.has_permission("Vault Credential", ptype="read", doc=cred.name, user=AUDITOR)
+        )
+        frappe.set_user(AUDITOR)
+        names = frappe.get_list("Vault Credential", filters={"vault_space": SPACE}, pluck="name")
+        self.assertEqual(names, [])
+
+    def test_framework_get_password_is_blocked(self):
+        """Codex finding #1: frappe.client.get_password must not hand back a vault secret
+        with no audit row. The override refuses and logs the attempt."""
+        cred = self._make_credential(title="GetPassword Bypass Test")
+        before = frappe.db.count("Credential Access Log", {"credential": cred.name})
+        from sssihms_password_vault.vault.api import get_password_override
+
+        with self.assertRaises(frappe.PermissionError):
+            get_password_override("Vault Credential", cred.name, "password")
+        after = frappe.db.count("Credential Access Log", {"credential": cred.name})
+        self.assertGreater(after, before)  # the blocked attempt is on record
+
+    def test_invalid_reveal_action_is_logged(self):
+        """Codex finding #4: a malformed action is an attempted-abuse signal and must be
+        logged as a denial, not thrown unrecorded."""
+        from sssihms_password_vault.vault.api import reveal_secret
+
+        cred = self._make_credential(title="Invalid Action Test")
+        frappe.set_user(MANAGER)
+        with self.assertRaises(Exception):
+            reveal_secret(cred.name, "password", action="exfiltrate")
+        frappe.set_user("Administrator")
+        self.assertTrue(
+            frappe.db.exists(
+                "Credential Access Log", {"credential": cred.name, "outcome": "denied"}
+            )
+        )
+
+    def test_credential_has_no_version_tracking(self):
+        """Codex finding #3: version tracking is off on Vault Credential, so no Version row
+        can ever carry a secret field regardless of Frappe's masking internals."""
+        meta = frappe.get_meta("Vault Credential")
+        self.assertFalse(meta.track_changes)

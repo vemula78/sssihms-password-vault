@@ -60,9 +60,6 @@ def reveal_secret(credential: str, field_key: str, action: str = "reveal") -> di
     them, because "copied to clipboard" and "displayed on screen" are different events to
     an auditor.
     """
-    if action not in ("reveal", "copy"):
-        frappe.throw(_("Invalid action."))
-
     user = frappe.session.user
 
     # frappe.get_doc does not itself check read permission (that is frappe.client.get's
@@ -72,7 +69,14 @@ def reveal_secret(credential: str, field_key: str, action: str = "reveal") -> di
 
     level = get_membership_level(user, doc.vault_space)
     denied_reason = None
-    if is_vault_auditor_only(user):
+    if action not in ("reveal", "copy"):
+        # A malformed action is itself an attempted-abuse signal, so it is logged like any
+        # other denial rather than thrown unrecorded (Codex finding #4). Checked first so a
+        # bad action can never be mistaken for a granted reveal. `action` is forced to a
+        # known-safe literal before it reaches write_access_log's ACTIONS validation.
+        denied_reason = f"invalid action: {str(action)[:40]!r}"
+        action = "reveal"
+    elif is_vault_auditor_only(user):
         # Defence in depth: an auditor who has somehow been added to a space still cannot
         # reveal. Checked before membership so auditor-ness can never be offset by it.
         denied_reason = "auditor role cannot reveal secrets"
@@ -147,6 +151,45 @@ def reveal_secret(credential: str, field_key: str, action: str = "reveal") -> di
         )
         or 30,
     }
+
+
+@frappe.whitelist()
+def get_password_override(doctype: str, name: str, fieldname: str):
+    """Override for the framework's ``frappe.client.get_password`` (wired in hooks.py).
+
+    The stock route decrypts any Password field for a System Manager and returns it with no
+    access-log row — bypassing the whole reveal audit and rate limit (Codex finding #1). For
+    Vault doctypes we refuse it outright and redirect the caller to the audited endpoint,
+    logging the attempt against the credential so an out-of-band grab is on record. Every
+    other doctype falls through to the framework's own implementation unchanged, so this
+    override does not weaken password retrieval anywhere else in ERPNext.
+    """
+    vault_doctypes = {"Vault Credential", "Credential Secret Field", "Vault Settings"}
+    if doctype in vault_doctypes:
+        # Best-effort audit: a Credential Secret Field name is a child row, so resolve its
+        # parent credential for the log; failure to resolve must not swallow the refusal.
+        try:
+            if doctype == "Vault Credential" and frappe.db.exists("Vault Credential", name):
+                write_access_log(
+                    frappe.get_doc("Vault Credential", name),
+                    action="reveal",
+                    outcome="denied",
+                    field_key=str(fieldname)[:60],
+                    detail="blocked frappe.client.get_password bypass",
+                )
+                frappe.db.commit()
+        except Exception:
+            # Never let an audit-write problem convert a refusal into a fall-through.
+            frappe.db.rollback()
+        frappe.throw(
+            _("Use the audited Reveal action on this credential — direct password "
+              "retrieval is disabled for the vault."),
+            frappe.PermissionError,
+        )
+
+    # Non-vault doctype: reproduce the stock behaviour exactly (System-Manager-only).
+    frappe.only_for("System Manager")
+    return frappe.get_lazy_doc(doctype, name).get_password(fieldname)
 
 
 def _find_secret_row(doc, field_key: str):

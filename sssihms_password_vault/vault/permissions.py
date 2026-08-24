@@ -162,6 +162,12 @@ def credential_query_conditions(user: str | None = None) -> str:
     user = user or frappe.session.user
     if is_vault_admin(user):
         return ""
+    if is_vault_auditor_only(user):
+        # An auditor is disqualified from reading credentials even where they hold a space
+        # membership (Codex finding #2): separation of duties is enforced at the ORM layer,
+        # not only inside reveal_secret. `1=0` returns an empty list rather than an error, so
+        # the auditor's log reports still run. Vault Admin (auditor+admin) returned above.
+        return "1=0"
     return (
         "exists (select 1 from `tabVault Space Member` vsm "
         "where vsm.parenttype = 'Vault Space' "
@@ -197,6 +203,12 @@ def credential_has_permission(doc, ptype: str | None = None, user: str | None = 
     user = user or frappe.session.user
     if is_vault_admin(user):
         return True
+
+    # An auditor-only user is barred from every credential permission type, membership
+    # notwithstanding (Codex finding #2) — the mirror of the query-condition guard, so a
+    # single-document get_doc/reveal path cannot reach what the list view already hides.
+    if is_vault_auditor_only(user):
+        return False
 
     ptype = ptype or "read"
     space = doc.get("vault_space") if doc else None
