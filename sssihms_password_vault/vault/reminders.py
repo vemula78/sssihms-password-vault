@@ -47,14 +47,23 @@ def daily_rotation_sweep() -> dict:
         row.name for row in frappe.get_all("Vault Space", filters={"disabled": 1}, fields=["name"])
     }
 
+    # Two conditions, not one: Frappe's query layer wraps date comparisons in
+    # ifnull(), so a bare `<=` filter also matches rows where rotation_due is NULL —
+    # every credential with no rotation policy would be "overdue" forever. Found live
+    # on the evaluation bench, not in code review.
     due = frappe.get_all(
         "Vault Credential",
-        filters={"rotation_due": ["<=", as_of]},
+        filters=[
+            ["rotation_due", "is", "set"],
+            ["rotation_due", "<=", as_of],
+        ],
         fields=["name", "title", "vault_space", "rotation_due", "last_reminded_on"],
     )
 
     by_space: dict[str, list] = {}
     for cred in due:
+        if not cred.rotation_due:
+            continue  # belt-and-braces for the ifnull hazard above
         if cred.vault_space in disabled_spaces:
             continue
         if cred.last_reminded_on and (as_of - getdate(cred.last_reminded_on)).days < repeat_days:
@@ -94,7 +103,17 @@ def daily_rotation_sweep() -> dict:
                     "email_content": message,
                 }
             ).insert(ignore_permissions=True)
-        frappe.sendmail(recipients=recipients, subject=subject, message=message)
+        try:
+            frappe.sendmail(recipients=recipients, subject=subject, message=message)
+        except Exception:
+            # No outgoing email account (or SMTP down) must not kill the scheduled job:
+            # the in-app Notification Log rows above are already written, which is the
+            # guaranteed channel. Email is best-effort on top. Found live on the
+            # evaluation bench (OutgoingEmailError with no SMTP configured).
+            frappe.log_error(
+                title="Password Vault rotation digest email failed",
+                message=f"space={space} recipients={len(recipients)}",
+            )
 
         for cred in credentials:
             # Direct write, not doc.save(): this is scheduler bookkeeping, not an edit — it

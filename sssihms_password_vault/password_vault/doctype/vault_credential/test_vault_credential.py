@@ -56,7 +56,11 @@ class TestVaultCredential(FrappeTestCase):
         _ensure_user(READER)
         _ensure_user(EDITOR)
         _ensure_user(MANAGER)
-        _ensure_user(OUTSIDER)
+        # The outsider carries Vault User deliberately: an account with no vault role is
+        # already stopped by the DocPerm ceiling, which proves nothing about the membership
+        # hooks. The case that matters is a user the role system WOULD admit, narrowed to
+        # nothing by has_permission + query conditions because no membership row exists.
+        _ensure_user(OUTSIDER, roles=("Vault User",))
         _ensure_user(AUDITOR, roles=("Vault Auditor",))
 
         if not frappe.db.exists("Vault Space", SPACE):
@@ -115,8 +119,15 @@ class TestVaultCredential(FrappeTestCase):
     def test_outsider_cannot_read_the_credential(self):
         cred = self._make_credential(title="Outsider Read Test")
         frappe.set_user(OUTSIDER)
+        # frappe.get_doc is permission-free ORM access by design; enforcement happens in
+        # check_permission, which is what every real entry point (frappe.client.get, the
+        # form view, our own API module) routes through. Assert on that layer.
+        doc = frappe.get_doc("Vault Credential", cred.name)
         with self.assertRaises(frappe.PermissionError):
-            frappe.get_doc("Vault Credential", cred.name)
+            doc.check_permission("read")
+        self.assertFalse(
+            frappe.has_permission("Vault Credential", ptype="read", doc=cred.name, user=OUTSIDER)
+        )
 
     def test_outsider_list_view_sees_nothing(self):
         self._make_credential(title="Outsider List Test")

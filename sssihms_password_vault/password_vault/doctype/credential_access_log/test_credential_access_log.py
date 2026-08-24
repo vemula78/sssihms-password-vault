@@ -50,9 +50,24 @@ class TestCredentialAccessLog(FrappeTestCase):
         self.assertEqual(row.user, "Administrator")
 
     def test_no_role_can_create_directly(self):
-        """DocPerms grant `create` to nobody (§1.6) — even Administrator's ORM-level
-        insert must go through write_access_log's ignore_permissions, not a bare
-        permission-checked insert."""
+        """DocPerms grant `create` to nobody (§1.6): a permission-checked insert must fail
+        for every role-based account, Vault Admin included — rows exist only via
+        write_access_log's ignore_permissions insert. Administrator is deliberately NOT the
+        actor here: Frappe hardcodes Administrator past all permission checks, so an
+        Administrator insert succeeding proves nothing about the DocPerm ceiling."""
+        admin_user = "vault-admin-logtest@example.test"
+        if not frappe.db.exists("User", admin_user):
+            frappe.get_doc(
+                {
+                    "doctype": "User",
+                    "email": admin_user,
+                    "first_name": "vault-admin-logtest",
+                    "send_welcome_email": 0,
+                }
+            ).insert(ignore_permissions=True)
+        frappe.get_doc("User", admin_user).add_roles("Vault Admin")
+
+        frappe.set_user(admin_user)
         doc = frappe.get_doc(
             {
                 "doctype": "Credential Access Log",
@@ -60,7 +75,7 @@ class TestCredentialAccessLog(FrappeTestCase):
                 "vault_space": TEST_SPACE,
                 "action": "reveal",
                 "outcome": "success",
-                "user": "Administrator",
+                "user": admin_user,
                 "timestamp": frappe.utils.now(),
             }
         )

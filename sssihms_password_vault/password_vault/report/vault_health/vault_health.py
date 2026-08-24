@@ -35,24 +35,24 @@ def execute(filters: dict | None = None):
                 frappe.PermissionError,
             )
 
-    # get_all for names, then get_doc per credential — deliberately not a single get_all
-    # with all fields, so credential_has_permission (and the query-conditions hook) stay in
-    # force document-by-document. A caller who somehow reached this function with a
-    # broader filters dict than their own membership permits still only sees what
-    # get_doc lets through; never ignore_permissions.
+    # get_all applies credential_query_conditions (the EXISTS-membership clause), so the
+    # name list is already scoped. The per-document pass below re-checks each one through
+    # frappe.has_permission — NOT frappe.get_doc, which is permission-free ORM access and
+    # filters nothing (a bug in the first version of this file: the try/except around
+    # get_doc could never fire). Never ignore_permissions anywhere in this path.
     cred_filters = {"vault_space": vault_space} if vault_space else {}
-    names = [row.name for row in frappe.get_all("Vault Credential", filters=cred_filters, fields=["name"])]
+    rows = frappe.get_all(
+        "Vault Credential", filters=cred_filters, fields=["name", "vault_space"]
+    )
 
     accessible: list[str] = []
     spaces_scanned: set[str] = set()
-    for name in names:
-        try:
-            doc = frappe.get_doc("Vault Credential", name)
-            accessible.append(name)
-            if doc.vault_space:
-                spaces_scanned.add(doc.vault_space)
-        except frappe.PermissionError:
+    for row in rows:
+        if not frappe.has_permission("Vault Credential", ptype="read", doc=row.name, user=user):
             continue
+        accessible.append(row.name)
+        if row.vault_space:
+            spaces_scanned.add(row.vault_space)
 
     result = analyze(collect_uses(accessible), as_of=frappe.utils.today())
 
